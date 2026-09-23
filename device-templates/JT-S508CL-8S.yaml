@@ -1,0 +1,53 @@
+model: "JT-S508CL-8S"
+manufacturer: "ONTI"
+
+# This device uses a JSON login endpoint (plaintext credentials, no MD5 hashing)
+# instead of the HC/KeepLink-style hashed cookie login.
+login:
+  required: true
+  url: "/login.cgi"
+  method: "POST"
+  referer_path: "/"
+  post_data:
+    name: "{{username}}"
+    pwd: "{{password}}"
+    page: "inside"
+
+# Device Global Information from /homepage.cgi (first table, key-value grid)
+device_info:
+  url: "/homepage.cgi"
+  method: "key_value_grid"
+  mappings:
+    uptime: "Uptime"
+    mac: "CPU MAC Address"
+    ip: "IP Address"
+    firmware: "Software Version"
+
+# Port Admin Status / Speed / Duplex from /homepage.cgi (second table).
+# Ports are named "Ethernet1/0/<n>"; only the trailing port number is kept.
+ports:
+  url: "/homepage.cgi"
+  source: "config_table"
+  port_table_match: "Speed/Duplex"
+  columns:
+    port: 0
+    admin: 1
+    config: 2
+    actual: 3
+    flow: 4
+    mdi: 5
+
+# Port counters from /Mon_port.cgi. Each direction pair shares one cell as
+# "rx/tx" (e.g. "unicast packets (R/T)" -> "34998221.0/88281016.0"). No
+# cumulative byte counters are exposed, only bytes/sec rate, so tx_bytes and
+# rx_bytes are derived from packet counts (consistent with the fallback used
+# elsewhere in this scraper when a device has no byte counter).
+statistics:
+  url: "/Mon_port.cgi"
+  format: "combined_rt"
+  port_column: 1
+  packet_terms: ["unicast packets", "multicast packets", "broadcast packets"]
+
+# MAC Address Table from /getSearchMac.cgi (VLAN ID / MAC Address / Type / Creator / Port columns)
+mac_table:
+  url: "/getSearchMac.cgi"

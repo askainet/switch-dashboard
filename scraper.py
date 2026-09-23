@@ -1265,7 +1265,7 @@ class HCSwitchScraper:
                             m_type = cells[type_idx].get_text(strip=True) if type_idx != -1 else "dynamic"
                             vlan = cells[vlan_idx].get_text(strip=True) if vlan_idx != -1 else "1"
                             
-                            if ":" in mac and len(mac) >= 12:
+                            if (":" in mac or "-" in mac) and len(mac) >= 12:
                                 rows_data.append({
                                     "mac": mac.upper(),
                                     "type": m_type,
@@ -1592,6 +1592,61 @@ class HCSwitchScraper:
                                             "tx_packets": 0, "rx_packets": 0, "tx_bytes": 0, "rx_bytes": 0
                                         })
 
+                    elif source == "config_table":
+                        # Realtek-style Layer 3 switch layout (e.g. JT-S508CL-8S): a single
+                        # table with columns Port / Admin Status / Speed-Duplex Config /
+                        # Speed-Duplex Actual / Flow Control / MDI, port names like "Ethernet1/0/1"
+                        match_keyword = ports_cfg.get("port_table_match", "Speed/Duplex")
+                        port_table = None
+                        for t in soup.find_all("table"):
+                            if match_keyword in t.get_text():
+                                port_table = t
+                                break
+
+                        if port_table:
+                            port_idx = columns.get("port", 0)
+                            admin_idx = columns.get("admin", 1)
+                            actual_idx = columns.get("actual", 3)
+                            flow_idx = columns.get("flow", 4)
+
+                            for row in port_table.find_all("tr"):
+                                cells = row.find_all("td")
+                                if len(cells) <= max(port_idx, admin_idx, actual_idx, flow_idx):
+                                    continue
+
+                                port_name = cells[port_idx].get_text(strip=True)
+                                match = re.search(r"(\d+)\s*$", port_name)
+                                port_num = match.group(1) if match else port_name
+
+                                admin_state = cells[admin_idx].get_text(strip=True).strip().lower()
+                                actual = cells[actual_idx].get_text(strip=True)
+                                flow_val = cells[flow_idx].get_text(strip=True) if len(cells) > flow_idx else ""
+
+                                if admin_state == "disabled":
+                                    status_val = "disable"
+                                    link_val = "Disabled"
+                                    speed_val = "Disabled"
+                                    duplex_val = "Disabled"
+                                elif "/" in actual:
+                                    status_val = "up"
+                                    link_val = "Link Up"
+                                    speed_val, duplex_val = actual.split("/", 1)
+                                else:
+                                    status_val = "down"
+                                    link_val = "Link Down"
+                                    speed_val = "Auto"
+                                    duplex_val = ""
+
+                                ports.append({
+                                    "port": port_num,
+                                    "status": status_val,
+                                    "link": link_val,
+                                    "speed": speed_val,
+                                    "duplex": duplex_val,
+                                    "flow_control": flow_val,
+                                    "tx_packets": 0, "rx_packets": 0, "tx_bytes": 0, "rx_bytes": 0
+                                })
+
         # 3. Scraping transmission statistics
         stats_cfg = template.get("statistics", {})
         has_stats = len(ports) > 0 and any(p.get("tx_packets", 0) > 0 for p in ports)
@@ -1601,12 +1656,53 @@ class HCSwitchScraper:
             if stats_html:
                 soup = BeautifulSoup(stats_html, "html.parser")
                 stats_table = soup.find("table")
-                if stats_table:
+                if stats_table and stats_cfg.get("format") == "combined_rt":
+                    # Realtek-style Layer 3 switch layout (e.g. JT-S508CL-8S): per-direction
+                    # counters share one cell as "rx/tx" (e.g. "unicast packets (R/T)" -> "34998221.0/88281016.0")
+                    rows = stats_table.find_all("tr")
+                    if len(rows) > 0:
+                        headers = [c.get_text(strip=True).strip().lower() for c in rows[0].find_all(["td", "th"])]
+                        port_col = stats_cfg.get("port_column", 1)
+                        packet_terms = stats_cfg.get("packet_terms", ["unicast packets", "multicast packets", "broadcast packets"])
+                        packet_idxs = [idx for idx, h in enumerate(headers) if any(term in h for term in packet_terms)]
+
+                        def _split_rt(cell_text):
+                            parts = cell_text.split("/")
+                            if len(parts) != 2:
+                                return 0, 0
+                            def _to_int(v):
+                                try:
+                                    return int(float(v.strip()))
+                                except ValueError:
+                                    return 0
+                            return _to_int(parts[0]), _to_int(parts[1])
+
+                        for row in rows[1:]:
+                            cells = row.find_all("td")
+                            if len(cells) <= port_col:
+                                continue
+                            port_text = cells[port_col].get_text(strip=True)
+                            match = re.search(r"(\d+)\s*$", port_text)
+                            port_num = match.group(1) if match else port_text
+                            for p in ports:
+                                if p["port"] == port_num:
+                                    rx_total = tx_total = 0
+                                    for idx in packet_idxs:
+                                        if idx < len(cells):
+                                            rx_val, tx_val = _split_rt(cells[idx].get_text(strip=True))
+                                            rx_total += rx_val
+                                            tx_total += tx_val
+                                    p["rx_packets"] = rx_total
+                                    p["tx_packets"] = tx_total
+                                    p["rx_bytes"] = rx_total * 800
+                                    p["tx_bytes"] = tx_total * 800
+                                    break
+                elif stats_table:
                     rows = stats_table.find_all("tr")
                     if len(rows) > 0:
                         first_row = rows[0]
                         headers = [c.get_text(strip=True).strip().lower() for c in first_row.find_all(["td", "th"])]
-                        
+
                         tx_pkt_idx = -1
                         rx_pkt_idx = -1
                         tx_bytes_idx = -1
