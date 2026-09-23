@@ -12,6 +12,12 @@ login:
     name: "{{username}}"
     pwd: "{{password}}"
     page: "inside"
+  # The login page sets these via client-side JS (base64 of the credentials, used
+  # to prefill the "remember me" form) before submitting; the server expects them
+  # to already be present as cookies on the login request.
+  extra_cookies:
+    webusername: "{{base64_username}}"
+    webpassword: "{{base64_password}}"
 
 # Device Global Information from /homepage.cgi (first table, key-value grid)
 device_info:

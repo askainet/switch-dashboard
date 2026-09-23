@@ -7,6 +7,7 @@ collections.Iterable = collections.abc.Iterable
 collections.Container = collections.abc.Container
 collections.Callable = collections.abc.Callable
 
+import base64
 import hashlib
 import urllib.request
 import urllib.parse
@@ -22,6 +23,8 @@ import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 _locks_lock = threading.Lock()
 _switch_locks = {}
@@ -110,7 +113,7 @@ class HCSwitchScraper:
             headers_dict['Content-Length'] = str(len(req.data))
             
         if 'User-Agent' not in headers_dict:
-            headers_dict['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            headers_dict['User-Agent'] = BROWSER_USER_AGENT
             
         headers_dict['Connection'] = 'close'
         
@@ -262,22 +265,50 @@ class HCSwitchScraper:
             
             auth_str = self.username + self.password
             md5hash = hashlib.md5(auth_str.encode()).hexdigest()
-            
+            b64_username = base64.b64encode(self.username.encode()).decode()
+            b64_password = base64.b64encode(self.password.encode()).decode()
+
             for k, v in post_data_raw.items():
                 if isinstance(v, str):
                     post_data[k] = v.replace("{{username}}", self.username)\
                                     .replace("{{password}}", self.password)\
-                                    .replace("{{md5hash}}", md5hash)
+                                    .replace("{{md5hash}}", md5hash)\
+                                    .replace("{{base64_username}}", b64_username)\
+                                    .replace("{{base64_password}}", b64_password)
                 else:
                     post_data[k] = v
-                    
+
+            # Some devices' login page sets "remember me" style cookies via client-side JS
+            # before the login POST is submitted, and expect them to be present on login.
+            extra_cookies_raw = login_cfg.get("extra_cookies", {})
+            for cookie_name, cookie_val in extra_cookies_raw.items():
+                if isinstance(cookie_val, str):
+                    cookie_val = cookie_val.replace("{{username}}", self.username)\
+                                            .replace("{{password}}", self.password)\
+                                            .replace("{{md5hash}}", md5hash)\
+                                            .replace("{{base64_username}}", b64_username)\
+                                            .replace("{{base64_password}}", b64_password)
+                self._cj.set_cookie(Cookie(
+                    version=0, name=cookie_name, value=str(cookie_val),
+                    port=None, port_specified=False,
+                    domain=self.ip, domain_specified=True,
+                    domain_initial_dot=False,
+                    path="/", path_specified=True,
+                    secure=False, expires=None, discard=True,
+                    comment=None, comment_url=None, rest={}
+                ))
+
             referer_path = login_cfg.get("referer_path", "/login.html")
-            headers = {"Referer": f"{self.base_url}{referer_path}"}
-            
+            headers = {
+                "Referer": f"{self.base_url}{referer_path}",
+                "User-Agent": BROWSER_USER_AGENT,
+            }
+
             data = None
             if method.upper() == "POST":
                 data = urllib.parse.urlencode(post_data).encode()
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
+                headers["Origin"] = self.base_url
                 
             req = urllib.request.Request(f"{self.base_url}{login_url}", data=data, headers=headers, method=method)
             try:
@@ -402,7 +433,7 @@ class HCSwitchScraper:
         logger.debug(f"[_fetch] Fetching path: {path}")
         # Enforce spacing between sequential uIP HTTP requests
         time.sleep(0.5)
-        headers = {"Referer": f"{self.base_url}/"}
+        headers = {"Referer": f"{self.base_url}/", "User-Agent": BROWSER_USER_AGENT}
         req = urllib.request.Request(f"{self.base_url}{path}", headers=headers)
         try:
             r = self._open_request_with_retry(req, timeout=45, max_retries=5)
