@@ -26,6 +26,18 @@ logger = logging.getLogger(__name__)
 
 BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
+
+def normalize_mac_address(mac):
+    """Normalize a MAC address to uppercase, colon-separated form (e.g. "AA:BB:CC:DD:EE:FF"),
+    regardless of the source delimiter (dash, dot-grouped, or none)."""
+    if not mac:
+        return mac
+    hex_only = re.sub(r"[^0-9A-Fa-f]", "", mac)
+    if len(hex_only) != 12:
+        return mac.strip().upper()
+    return ":".join(hex_only[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
 _locks_lock = threading.Lock()
 _switch_locks = {}
 
@@ -564,7 +576,7 @@ class HCSwitchScraper:
                         if "Sys Uptime" in label:
                             device_info["uptime"] = self._fmt_uptime(value)
                         elif "MAC Address" in label:
-                            device_info["mac"] = value
+                            device_info["mac"] = normalize_mac_address(value)
                         elif "IP Address" in label:
                             device_info["ip"] = value
                         elif "Firmware Version" in label:
@@ -1036,7 +1048,7 @@ class HCSwitchScraper:
             
             if mac:
                 entries.append({
-                    "mac": mac.upper(),
+                    "mac": normalize_mac_address(mac),
                     "type": "static" if "static" in m_type.lower() or m_type.lower() == "s" else "dynamic",
                     "port": f"Port {port}" if not port.lower().startswith("port") else port,
                     "vlan": vlan
@@ -1298,7 +1310,7 @@ class HCSwitchScraper:
                             
                             if (":" in mac or "-" in mac) and len(mac) >= 12:
                                 rows_data.append({
-                                    "mac": mac.upper(),
+                                    "mac": normalize_mac_address(mac),
                                     "type": m_type,
                                     "port": port,
                                     "vlan": vlan
@@ -1406,7 +1418,8 @@ class HCSwitchScraper:
                         data = json.loads(info_html)
                         mappings = info_cfg.get("mappings", {})
                         for key, json_key in mappings.items():
-                            device_info[key] = str(data.get(json_key, ""))
+                            raw_val = str(data.get(json_key, ""))
+                            device_info[key] = normalize_mac_address(raw_val) if key == "mac" else raw_val
                     except Exception as e:
                         logger.error(f"Error parsing JSON device_info: {e}")
                 else:
@@ -1426,6 +1439,8 @@ class HCSwitchScraper:
                                     if label_term.lower() in label.lower():
                                         if key == "uptime":
                                             device_info["uptime"] = self._fmt_uptime(value)
+                                        elif key == "mac":
+                                            device_info["mac"] = normalize_mac_address(value)
                                         else:
                                             device_info[key] = value
 
