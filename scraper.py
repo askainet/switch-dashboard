@@ -488,6 +488,51 @@ class HCSwitchScraper:
         except ValueError:
             return 0
 
+    def _fetch_snmp_octets(self, snmp_cfg, ports):
+        """Overwrite tx_bytes/rx_bytes on `ports` with real cumulative octet counters
+        (ifHCInOctets/ifHCOutOctets) fetched over SNMP, when a `snmp` block is present
+        in the template. Falls back silently (leaving whatever estimate is already on
+        the port) if the puresnmp library is missing or the query fails."""
+        try:
+            import asyncio
+            from puresnmp import Client, PyWrapper, V2C
+        except ImportError:
+            logger.warning("SNMP byte counters requested but the 'puresnmp' package is not installed; skipping.")
+            return
+
+        community = snmp_cfg.get("community", "public")
+        in_oid_base = snmp_cfg.get("in_octets_oid", "1.3.6.1.2.1.31.1.1.1.6")
+        out_oid_base = snmp_cfg.get("out_octets_oid", "1.3.6.1.2.1.31.1.1.1.10")
+
+        if_indexes = {}
+        oids = []
+        for p in ports:
+            match = re.search(r"(\d+)\s*$", str(p["port"]))
+            if_index = match.group(1) if match else str(p["port"])
+            if_indexes[p["port"]] = if_index
+            oids.append(f"{in_oid_base}.{if_index}")
+            oids.append(f"{out_oid_base}.{if_index}")
+
+        async def _query():
+            client = PyWrapper(Client(self.ip, V2C(community)))
+            return await client.multiget(oids)
+
+        try:
+            values = asyncio.run(_query())
+        except Exception as e:
+            logger.error(f"SNMP byte counter fetch failed for {self.ip}: {e}")
+            return
+
+        by_oid = dict(zip(oids, values))
+        for p in ports:
+            if_index = if_indexes[p["port"]]
+            in_val = by_oid.get(f"{in_oid_base}.{if_index}")
+            out_val = by_oid.get(f"{out_oid_base}.{if_index}")
+            if in_val is not None:
+                p["rx_bytes"] = int(in_val)
+            if out_val is not None:
+                p["tx_bytes"] = int(out_val)
+
     def scrape(self):
         with get_switch_lock(self.ip):
             logger.debug(f"Running full telemetry scrape for switch {self.name} ({self.ip})...")
@@ -1796,6 +1841,13 @@ class HCSwitchScraper:
                                         else:
                                             p["rx_bytes"] = rx_pkts * 800
                                         break
+
+        # 3b. Optionally replace estimated tx_bytes/rx_bytes with real cumulative
+        # octet counters (ifHCInOctets/ifHCOutOctets) polled over SNMP, for devices
+        # whose web UI only exposes packet counts or a bytes/sec rate.
+        snmp_cfg = template.get("snmp", {})
+        if snmp_cfg and ports:
+            self._fetch_snmp_octets(snmp_cfg, ports)
 
         # 4. Scraping DHCP Snooping
         dhcp_snooping = {"enabled": False, "ports": {}}
