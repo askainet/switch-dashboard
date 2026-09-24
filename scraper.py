@@ -1886,37 +1886,91 @@ class HCSwitchScraper:
         if igmp_cfg:
             url = igmp_cfg.get("url", "/igmp.cgi?page=dump")
             html = self._fetch(url)
+
+            # Some devices expose the global enable/disable toggle as a <select> on a
+            # separate config page rather than a checkbox on the group table page itself.
+            enable_url = igmp_cfg.get("enable_url")
+            enable_html = self._fetch(enable_url) if enable_url else html
+
+            if enable_html:
+                enable_soup = BeautifulSoup(enable_html, "html.parser")
+
+                enable_input_name = igmp_cfg.get("enable_input_name")
+                if enable_input_name:
+                    enable_input = enable_soup.find("input", {"name": enable_input_name})
+                    if enable_input and enable_input.has_attr("checked"):
+                        igmp["enabled"] = True
+
+                enable_select_name = igmp_cfg.get("enable_select_name")
+                if enable_select_name:
+                    enable_select = enable_soup.find("select", {"name": enable_select_name})
+                    if enable_select:
+                        selected = enable_select.find("option", selected=True)
+                        if selected and selected.get("value") == "1":
+                            igmp["enabled"] = True
+
+            entries = []
             if html:
                 soup = BeautifulSoup(html, "html.parser")
-                
-                enable_input_name = igmp_cfg.get("enable_input_name", "enable_igmp")
-                enable_input = soup.find("input", {"name": enable_input_name})
-                if enable_input and enable_input.has_attr("checked"):
-                    igmp["enabled"] = True
-                    
-                entries = []
-                table = None
-                keywords = igmp_cfg.get("table_header_keywords", ["IP Address", "Port", "VLAN ID"])
-                for t in soup.find_all("table"):
-                    text_content = t.get_text()
-                    if all(k in text_content for k in keywords):
-                        table = t
-                        break
-                        
-                if table:
-                    rows = table.find_all("tr")[1:]
-                    for row in rows:
-                        cells = row.find_all("td")
-                        if len(cells) >= 3:
-                            ip_addr = cells[0].get_text(strip=True)
-                            ports_text = cells[1].get_text(strip=True)
-                            vlan = cells[2].get_text(strip=True)
-                            entries.append({
-                                "vlan": vlan,
-                                "ip": ip_addr,
-                                "ports": ports_text
-                            })
-                igmp["entries"] = entries
+
+                if igmp_cfg.get("format") == "mcast_table":
+                    # Realtek-style Layer 3 switch layout (e.g. JT-S508CL-8S): the live
+                    # group table has no VLAN column of its own -- the VLAN is whichever
+                    # the page's own VLAN filter <select> is currently showing.
+                    keywords = igmp_cfg.get("table_header_keywords", ["Group IP", "Member Port", "Exptime"])
+                    data_table = None
+                    for t in soup.find_all("table"):
+                        if all(k in t.get_text() for k in keywords):
+                            data_table = t
+                            break
+
+                    vlan_select_name = igmp_cfg.get("vlan_select_name", "vlan")
+                    current_vlan = ""
+                    vlan_select = soup.find("select", {"name": vlan_select_name})
+                    if vlan_select:
+                        selected_option = vlan_select.find("option", selected=True)
+                        if selected_option:
+                            current_vlan = selected_option.get("value", selected_option.get_text(strip=True))
+
+                    if data_table:
+                        columns = igmp_cfg.get("columns", {})
+                        ip_idx = columns.get("ip", 1)
+                        port_idx = columns.get("port", 3)
+                        for row in data_table.find_all("tr"):
+                            cells = row.find_all("td")
+                            if len(cells) <= max(ip_idx, port_idx):
+                                continue
+                            ip_addr = cells[ip_idx].get_text(strip=True)
+                            ports_text = cells[port_idx].get_text(strip=True)
+                            if ip_addr:
+                                entries.append({
+                                    "vlan": current_vlan,
+                                    "ip": ip_addr,
+                                    "ports": ports_text
+                                })
+                else:
+                    table = None
+                    keywords = igmp_cfg.get("table_header_keywords", ["IP Address", "Port", "VLAN ID"])
+                    for t in soup.find_all("table"):
+                        text_content = t.get_text()
+                        if all(k in text_content for k in keywords):
+                            table = t
+                            break
+
+                    if table:
+                        rows = table.find_all("tr")[1:]
+                        for row in rows:
+                            cells = row.find_all("td")
+                            if len(cells) >= 3:
+                                ip_addr = cells[0].get_text(strip=True)
+                                ports_text = cells[1].get_text(strip=True)
+                                vlan = cells[2].get_text(strip=True)
+                                entries.append({
+                                    "vlan": vlan,
+                                    "ip": ip_addr,
+                                    "ports": ports_text
+                                })
+            igmp["entries"] = entries
 
         # 6. Scraping Jumbo Frame
         jumbo_frame = {"enabled": False, "size": "Disabled"}

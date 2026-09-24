@@ -68,3 +68,18 @@ snmp:
 # MAC Address Table from /getSearchMac.cgi (VLAN ID / MAC Address / Type / Creator / Port columns)
 mac_table:
   url: "/getSearchMac.cgi"
+
+# IGMP Snooping multicast groups from /getIgmpMcastTable.cgi. This page only
+# shows the group table for whichever VLAN its own filter <select> is
+# currently set to (no explicit per-VLAN query needed for the default view);
+# the global enable/disable toggle lives on a separate page instead.
+igmp:
+  url: "/getIgmpMcastTable.cgi"
+  format: "mcast_table"
+  table_header_keywords: ["Group IP", "Member Port", "Exptime"]
+  columns:
+    ip: 1
+    port: 3
+  vlan_select_name: "vlan"
+  enable_url: "/getIgmpBasic.cgi"
+  enable_select_name: "state"
